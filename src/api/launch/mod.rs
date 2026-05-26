@@ -270,6 +270,10 @@ bitflags! {
         /// When set, the guest may not be transmitted to another
         /// platform that is not CSV-capable.
         const CSV             = 0b00100000u16.to_le();
+
+        /// When set, CSV3 protections are required. The CSV2
+        /// protections are also required.
+        const CSV3            = 0b01000000u16.to_le();
     }
 }
 
