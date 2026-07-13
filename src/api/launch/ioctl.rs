@@ -34,6 +34,10 @@ impl_const_id! {
     LaunchMeasure<'_> = 6,
     LaunchFinish = 7,
     Attestation<'_> = 20,
+    Csv3Init = 0xc0,
+    Csv3LaunchEncryptData = 0xc1,
+    Csv3LaunchEncryptVmcb = 0xc2,
+    Csv3SetGuestPrivateMemory = 0xc8,
 }
 
 const KVM: Group = Group::new(0xAE);
@@ -56,6 +60,21 @@ pub const INIT: Ioctl<WriteRead, &Command<Init>> = unsafe { ENC_OP.lie() };
 
 /// Initialize the CSV2 platform context.
 pub const ES_INIT: Ioctl<WriteRead, &Command<EsInit>> = unsafe { ENC_OP.lie() };
+
+/// Initialize the CSV3 platform context.
+pub const CSV3_INIT: Ioctl<WriteRead, &Command<Csv3Init>> = unsafe { ENC_OP.lie() };
+
+/// Set guest private memory for CSV3.
+pub const CSV3_SET_GUEST_PRIVATE_MEMORY: Ioctl<WriteRead, &Command<Csv3SetGuestPrivateMemory>> =
+    unsafe { ENC_OP.lie() };
+
+/// Encrypt guest data with its VEK for CSV3.
+pub const CSV3_LAUNCH_ENCRYPT_DATA: Ioctl<WriteRead, &Command<Csv3LaunchEncryptData>> =
+    unsafe { ENC_OP.lie() };
+
+/// Encrypt the VMCB contents for CSV3.
+pub const CSV3_LAUNCH_ENCRYPT_VMCB: Ioctl<WriteRead, &Command<Csv3LaunchEncryptVmcb>> =
+    unsafe { ENC_OP.lie() };
 
 /// Create encrypted guest context.
 pub const LAUNCH_START: Ioctl<WriteRead, &Command<LaunchStart>> = unsafe { ENC_OP.lie() };

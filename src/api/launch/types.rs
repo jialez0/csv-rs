@@ -23,6 +23,45 @@ pub struct Init;
 #[repr(C)]
 pub struct EsInit;
 
+/// Initialize the CSV3 platform context.
+#[repr(C)]
+pub struct Csv3Init {
+    /// NUMA node mask for memory allocation
+    pub nodemask: u64,
+}
+
+impl Csv3Init {
+    /// Create a new CSV3 initialization structure.
+    ///
+    /// # Arguments
+    /// * `nodemask` - NUMA node mask for memory allocation. Set to 0 for default behavior.
+    pub fn new(nodemask: u64) -> Self {
+        Self { nodemask }
+    }
+}
+
+/// Set guest private memory for CSV3.
+/// Corresponds to `KVM_CSV3_SET_GUEST_PRIVATE_MEMORY`.
+#[repr(C)]
+pub struct Csv3SetGuestPrivateMemory;
+
+/// Encrypt guest data with its VEK for CSV3.
+/// Corresponds to `KVM_CSV3_LAUNCH_ENCRYPT_DATA` (`struct kvm_csv3_launch_encrypt_data`).
+#[repr(C)]
+pub struct Csv3LaunchEncryptData {
+    /// Guest physical address of the memory to encrypt.
+    pub gpa: u64,
+    /// Userspace address of the data to encrypt.
+    pub uaddr: u64,
+    /// Length of the data to encrypt.
+    pub len: u32,
+}
+
+/// Encrypt the VMCB contents for CSV3.
+/// Corresponds to `KVM_CSV3_LAUNCH_ENCRYPT_VMCB`.
+#[repr(C)]
+pub struct Csv3LaunchEncryptVmcb;
+
 #[repr(transparent)]
 pub struct Handle(u32);
 
