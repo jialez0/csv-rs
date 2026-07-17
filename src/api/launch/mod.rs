@@ -312,11 +312,16 @@ impl<U: AsRawFd, V: AsRawFd> Launcher<Measured, U, V> {
     }
 
     /// Complete the CSV launch process.
-    pub fn finish(mut self) -> Result<Handle> {
+    ///
+    /// This borrows the launcher instead of consuming it, allowing the launcher
+    /// (and its CSV fd) to remain alive in the Vm for the VM's entire lifetime.
+    pub fn finish(&mut self) -> Result<Handle> {
         let mut cmd = Command::from(&mut self.csv, &LaunchFinish);
         LAUNCH_FINISH
             .ioctl(&mut self.vm_fd, &mut cmd)
             .map_err(|e| cmd.encapsulate(e))?;
+
+        // Handle now implements Copy, so we can copy it directly
         Ok(self.state.0)
     }
 }

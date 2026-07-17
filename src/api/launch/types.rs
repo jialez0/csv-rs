@@ -63,6 +63,7 @@ pub struct Csv3LaunchEncryptData {
 pub struct Csv3LaunchEncryptVmcb;
 
 #[repr(transparent)]
+#[derive(Copy, Clone)]
 pub struct Handle(u32);
 
 impl From<LaunchStart<'_>> for Handle {
