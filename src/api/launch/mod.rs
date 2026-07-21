@@ -8,7 +8,7 @@
 pub(crate) mod ioctl;
 use ioctl::*;
 
-pub(crate) mod types;
+pub mod types;
 use types::*;
 
 use crate::{
@@ -77,6 +77,37 @@ impl<U: AsRawFd, V: AsRawFd> Launcher<New, U, V> {
 
         let mut cmd = Command::from(&mut launcher.csv, &EsInit);
         ES_INIT
+            .ioctl(&mut launcher.vm_fd, &mut cmd)
+            .map_err(|e| cmd.encapsulate(e))?;
+
+        Ok(launcher)
+    }
+
+    /// Begin the CSV3 launch process.
+    ///
+    /// CSV3 initialization requires first initializing CSV2 (ES_INIT), then
+    /// performing CSV3-specific initialization.
+    ///
+    /// # Arguments
+    /// * `kvm` - The KVM virtual machine file descriptor
+    /// * `csv` - The CSV device file descriptor
+    /// * `csv3_init` - The CSV3 initialization parameters constructed by the caller
+    pub fn new_csv3(kvm: U, csv: V, csv3_init: &Csv3Init) -> Result<Self> {
+        let mut launcher = Launcher {
+            vm_fd: kvm,
+            csv,
+            state: New,
+        };
+
+        // Step 1: Initialize CSV2 (ES_INIT)
+        let mut cmd = Command::from(&mut launcher.csv, &EsInit);
+        ES_INIT
+            .ioctl(&mut launcher.vm_fd, &mut cmd)
+            .map_err(|e| cmd.encapsulate(e))?;
+
+        // Step 2: Initialize CSV3 (CSV3_INIT)
+        let mut cmd = Command::from(&mut launcher.csv, csv3_init);
+        CSV3_INIT
             .ioctl(&mut launcher.vm_fd, &mut cmd)
             .map_err(|e| cmd.encapsulate(e))?;
 
@@ -186,6 +217,49 @@ impl<U: AsRawFd, V: AsRawFd> Launcher<Started, U, V> {
         Ok(())
     }
 
+    /// Set guest private memory for CSV3.
+    ///
+    /// This notifies the kernel/firmware to mark the guest memory as private/secure.
+    /// Corresponds to `KVM_CSV3_SET_GUEST_PRIVATE_MEMORY`.
+    pub fn set_guest_private_memory(&mut self) -> Result<()> {
+        let mut cmd = Command::from(&mut self.csv, &Csv3SetGuestPrivateMemory);
+
+        CSV3_SET_GUEST_PRIVATE_MEMORY
+            .ioctl(&mut self.vm_fd, &mut cmd)
+            .map_err(|e| cmd.encapsulate(e))?;
+
+        Ok(())
+    }
+
+    /// Encrypt guest data with its VEK for CSV3.
+    ///
+    /// Corresponds to `KVM_CSV3_LAUNCH_ENCRYPT_DATA`.
+    /// The caller is responsible for constructing `Csv3LaunchEncryptData` with
+    /// the appropriate GPA, userspace address, and length.
+    pub fn encrypt_data(&mut self, data: &Csv3LaunchEncryptData) -> Result<()> {
+        let mut cmd = Command::from(&mut self.csv, data);
+
+        CSV3_LAUNCH_ENCRYPT_DATA
+            .ioctl(&mut self.vm_fd, &mut cmd)
+            .map_err(|e| cmd.encapsulate(e))?;
+
+        Ok(())
+    }
+
+    /// Encrypt the VMCB contents for CSV3.
+    ///
+    /// Corresponds to `KVM_CSV3_LAUNCH_ENCRYPT_VMCB`.
+    /// CSV3 equivalent of `update_vmsa()` for CSV2.
+    pub fn encrypt_vmcb(&mut self) -> Result<()> {
+        let mut cmd = Command::from(&mut self.csv, &Csv3LaunchEncryptVmcb);
+
+        CSV3_LAUNCH_ENCRYPT_VMCB
+            .ioctl(&mut self.vm_fd, &mut cmd)
+            .map_err(|e| cmd.encapsulate(e))?;
+
+        Ok(())
+    }
+
     /// Request a measurement from the CSV firmware.
     pub fn measure(mut self) -> Result<Launcher<Measured, U, V>> {
         let mut measurement = MaybeUninit::uninit();
@@ -238,11 +312,16 @@ impl<U: AsRawFd, V: AsRawFd> Launcher<Measured, U, V> {
     }
 
     /// Complete the CSV launch process.
-    pub fn finish(mut self) -> Result<Handle> {
+    ///
+    /// This borrows the launcher instead of consuming it, allowing the launcher
+    /// (and its CSV fd) to remain alive in the Vm for the VM's entire lifetime.
+    pub fn finish(&mut self) -> Result<Handle> {
         let mut cmd = Command::from(&mut self.csv, &LaunchFinish);
         LAUNCH_FINISH
             .ioctl(&mut self.vm_fd, &mut cmd)
             .map_err(|e| cmd.encapsulate(e))?;
+
+        // Handle now implements Copy, so we can copy it directly
         Ok(self.state.0)
     }
 }
@@ -270,6 +349,10 @@ bitflags! {
         /// When set, the guest may not be transmitted to another
         /// platform that is not CSV-capable.
         const CSV             = 0b00100000u16.to_le();
+
+        /// When set, CSV3 protections are required. The CSV2
+        /// protections are also required.
+        const CSV3            = 0b01000000u16.to_le();
     }
 }
 
