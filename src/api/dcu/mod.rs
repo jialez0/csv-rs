@@ -72,6 +72,12 @@ impl DcuDevice {
         // Discover available DCU nodes
         let num_node = num_subdirs("/sys/devices/virtual/kfd/kfd/topology/nodes", "");
         let mut reports: Vec<AttestationReport> = Vec::with_capacity(num_node);
+        let hyflash_path = [
+            "/opt/hyhal/vbios/hyflash_x86",
+            "/opt/hyhal/firmware/vbios/hyflash_x86",
+        ]
+        .into_iter()
+        .find(|path| Path::new(path).exists());
 
         // Process each DCU node
         for node in 0..num_node {
@@ -85,6 +91,31 @@ impl DcuDevice {
                     continue;
                 }
 
+                if let Some(path) = hyflash_path {
+                    let node_index = dcu_id.saturating_sub(1); // --node argument for hyflash
+                    // Run hyflash to query the security state. The command's
+                    // exit status is not checked; only the captured output is
+                    // inspected for "SECURE" to skip non-SECURE nodes.
+                    let output = std::process::Command::new(path)
+                        .arg("--node")
+                        .arg(node_index.to_string())
+                        .arg("--securityState")
+                        .output();
+
+                    if let Ok(output) = output {
+                        let output_text = format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        if !output_text.contains("SECURE") {
+                            trace!("Node {} (DCU ID {}) is not SECURE, skipping", node, dcu_id);
+                            continue;
+                        }
+                    }
+                } else {
+                    trace!("hyflash_x86 not found, skipping security-state check");
+                }
                 // Initialize attestation request
                 let mut args = MkfdIoctlSecurityAttestationArgs::new();
                 args.set_attestation_args(dcu_id, userdata)?;
