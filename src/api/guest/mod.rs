@@ -86,6 +86,13 @@ impl CsvGuest {
     ///
     /// If extended attestation report is not supported, then request legacy
     /// attestation report.
+    ///
+    /// When the [`CSV_ATTESTATION_FLAG_REPORT_EXT_V3`] flag is set, the CSV3
+    /// attestation report (i.e. AttestationReportV3) is requested. However, the
+    /// CSV3 report format requires a firmware build version >=
+    /// [`CSV3_ATTESTATION_MIN_BUILD`]. Therefore we first request a V2 report to
+    /// inspect the build version, and only then request the V3 report if the
+    /// requirement is met; otherwise we fall back to the V2 report.
     pub fn get_report_ext(
         &mut self,
         data: Option<[u8; 64]>,
@@ -93,53 +100,100 @@ impl CsvGuest {
         flags: u32,
     ) -> Result<AttestationReportWrapper, Error> {
         if !self.check_attestation_report_v2_supported() {
-            self.get_report(data, mnonce)
-        } else if flags == 0 {
-            // If flags is 0, generate AttestationReportV1.
-            self.get_report(data, mnonce)
-        } else {
-            let mut mnonce_value = [0u8; 16];
-            if let Some(mnonce) = mnonce {
-                mnonce_value = mnonce;
-            } else {
-                let mut rng = rand::thread_rng();
-                for element in &mut mnonce_value {
-                    *element = rng.gen();
-                }
-            }
-
-            let report_request = ReportReqExt::new(data, mnonce_value, flags)?;
-
-            let mut report_response = AttestationReportV2::default();
-
-            // Convert ReportReqExt to bytes
-            let request_bytes: &[u8] = unsafe {
-                let req_ptr = &report_request as *const ReportReqExt as *const u8;
-                std::slice::from_raw_parts(req_ptr, std::mem::size_of::<ReportReqExt>())
-            };
-
-            let response_bytes: &mut [u8] = unsafe {
-                let rsp_ptr = &mut report_response as *mut AttestationReportV2 as *mut u8;
-                std::slice::from_raw_parts_mut(rsp_ptr, std::mem::size_of::<AttestationReportV2>())
-            };
-
-            // Copy bytes from report_request_ext to report_response_ext
-            response_bytes[..request_bytes.len()].copy_from_slice(request_bytes);
-
-            let mut guest_report_request = GuestReportRequest::new(response_bytes);
-
-            CSV_GET_REPORT.ioctl(&mut self.0, &mut guest_report_request)?;
-
-            report_response
-                .signer
-                .verify(&mnonce_value, &report_response.tee_info.mnonce, &0)?;
-
-            Ok(AttestationReportWrapper::new(
-                ATTESTATION_EXT_MAGIC,
-                flags,
-                response_bytes,
-            ))
+            return self.get_report(data, mnonce);
         }
+
+        if flags == 0 {
+            // If flags is 0, generate AttestationReportV1.
+            return self.get_report(data, mnonce);
+        }
+
+        let mut mnonce_value = [0u8; 16];
+        if let Some(mnonce) = mnonce {
+            mnonce_value = mnonce;
+        } else {
+            let mut rng = rand::thread_rng();
+            for element in &mut mnonce_value {
+                *element = rng.gen();
+            }
+        }
+
+        if flags & CSV_ATTESTATION_FLAG_REPORT_EXT_V3 != 0 {
+            // Probe the firmware build version with a V2 report first.
+            let v2_wrapper =
+                self.request_report_ext(data, mnonce_value, CSV_ATTESTATION_FLAG_REPORT_EXT)?;
+            let build = match AttestationReport::try_from(&v2_wrapper) {
+                Ok(AttestationReport::V2(report)) => report.tee_info.build,
+                _ => return Ok(v2_wrapper),
+            };
+
+            if build >= CSV3_ATTESTATION_MIN_BUILD {
+                self.request_report_ext(data, mnonce_value, flags)
+            } else {
+                Ok(v2_wrapper)
+            }
+        } else {
+            self.request_report_ext(data, mnonce_value, flags)
+        }
+    }
+
+    /// Issue an extended attestation report request with the given flags and
+    /// return the raw response wrapped in an [`AttestationReportWrapper`].
+    ///
+    /// The response buffer type is chosen based on `flags`: a V3 request uses
+    /// [`AttestationReportV3`], while any other extended request uses
+    /// [`AttestationReportV2`].
+    fn request_report_ext(
+        &mut self,
+        data: Option<[u8; 64]>,
+        mnonce_value: [u8; 16],
+        flags: u32,
+    ) -> Result<AttestationReportWrapper, Error> {
+        if flags & CSV_ATTESTATION_FLAG_REPORT_EXT_V3 != 0 {
+            self.request_report_ext_as::<AttestationReportV3>(data, mnonce_value, flags)
+        } else {
+            self.request_report_ext_as::<AttestationReportV2>(data, mnonce_value, flags)
+        }
+    }
+
+    /// Issue an extended attestation report request whose response buffer is of
+    /// type `R`, returning the raw response wrapped in an
+    /// [`AttestationReportWrapper`].
+    fn request_report_ext_as<R: ExtReportResponse>(
+        &mut self,
+        data: Option<[u8; 64]>,
+        mnonce_value: [u8; 16],
+        flags: u32,
+    ) -> Result<AttestationReportWrapper, Error> {
+        let report_request = ReportReqExt::new(data, mnonce_value, flags)?;
+
+        let mut report_response = R::default();
+
+        // Convert ReportReqExt to bytes
+        let request_bytes: &[u8] = unsafe {
+            let req_ptr = &report_request as *const ReportReqExt as *const u8;
+            std::slice::from_raw_parts(req_ptr, std::mem::size_of::<ReportReqExt>())
+        };
+
+        let response_bytes: &mut [u8] = unsafe {
+            let rsp_ptr = &mut report_response as *mut R as *mut u8;
+            std::slice::from_raw_parts_mut(rsp_ptr, std::mem::size_of::<R>())
+        };
+
+        // Copy bytes from report_request_ext to report_response_ext
+        response_bytes[..request_bytes.len()].copy_from_slice(request_bytes);
+
+        let mut guest_report_request = GuestReportRequest::new(response_bytes);
+
+        CSV_GET_REPORT.ioctl(&mut self.0, &mut guest_report_request)?;
+
+        report_response.verify_signer(&mnonce_value)?;
+
+        Ok(AttestationReportWrapper::new(
+            ATTESTATION_EXT_MAGIC,
+            flags,
+            response_bytes,
+        ))
     }
 
     /// Request rtmr_status
@@ -320,3 +374,28 @@ impl CsvGuest {
         self.check_rtmr_supported()
     }
 }
+
+/// Common interface shared by [`AttestationReportV2`] and
+/// [`AttestationReportV3`] so they can be used interchangeably as the response
+/// buffer of an extended attestation report request.
+trait ExtReportResponse: Default + Sized {
+    /// Verify the signer HMAC of the report using the given guest-provided
+    /// mnonce. The signer and mnonce fields share the same layout in both
+    /// [`AttestationReportV2`] and [`AttestationReportV3`], so the verification
+    /// logic is identical for the two.
+    fn verify_signer(&mut self, mnonce_value: &[u8]) -> Result<(), Error>;
+}
+
+macro_rules! impl_ext_report_response {
+    ($($report:ty),+ $(,)?) => {
+        $(
+            impl ExtReportResponse for $report {
+                fn verify_signer(&mut self, mnonce_value: &[u8]) -> Result<(), Error> {
+                    self.signer.verify(mnonce_value, &self.tee_info.mnonce, &0)
+                }
+            }
+        )+
+    };
+}
+
+impl_ext_report_response!(AttestationReportV2, AttestationReportV3);
