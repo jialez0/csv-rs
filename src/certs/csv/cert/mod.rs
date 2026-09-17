@@ -325,13 +325,36 @@ impl Certificate {
     }
 }
 
+/// Converts a fixed-width firmware chip ID to its canonical string form.
+#[cfg(any(feature = "network", test))]
+fn normalize_chip_id(sn: &[u8]) -> std::io::Result<&str> {
+    let chip_id = std::str::from_utf8(sn)
+        .map_err(|error| Error::new(ErrorKind::InvalidData, error))?
+        .trim_end_matches(|c: char| c == '\0' || c.is_ascii_whitespace());
+    if chip_id.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidData, "chip ID is empty"));
+    }
+    if !chip_id
+        .as_bytes()
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "chip ID contains unsupported characters",
+        ));
+    }
+    Ok(chip_id)
+}
+
 /// Downloads the HSK CEK certificate from the hygon certificate server.
 #[cfg(feature = "network")]
 pub async fn download_hskcek(
     sn: &[u8],
 ) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    // Convert serial number bytes to string and trim null terminator
-    let chip_id = std::str::from_utf8(sn)?.trim_end_matches('\0');
+    // Firmware reports use a fixed-width chip ID field. Strip both NUL and
+    // ASCII-whitespace padding before using it in a URL or filesystem path.
+    let chip_id = normalize_chip_id(sn)?;
     let kds_url = format!("https://cert.hygon.cn/hsk_cek?snumber={chip_id}");
     log::trace!("kds_url: {}", kds_url);
     // Create async HTTP client (recommend reusing client in production)
@@ -355,22 +378,63 @@ pub async fn get_certificate_data(
     let cert_dir =
         std::env::var("HSK_CEK_CERT_PATH").unwrap_or_else(|_| "/opt/dcu/certs".to_string());
 
-    // 2.Convert chip_id to string
-    let chip_id_str =
-        std::str::from_utf8(chip_id).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    // 2. Convert the fixed-width chip ID to its canonical unpadded form.
+    let chip_id_str = normalize_chip_id(chip_id)?;
 
     // 3. Build full certificate path
-    let cert_path = format!("{}/{}_hsk_cek.cert", cert_dir, chip_id_str);
+    let cert_path = std::path::Path::new(&cert_dir).join(format!("{chip_id_str}_hsk_cek.cert"));
 
-    // 4. Check file existence and read or download
-    if tokio::fs::metadata(&cert_path).await.is_ok() {
-        log::debug!("Reading certificate from: {}", cert_path);
-        tokio::fs::read(cert_path).await.map_err(Into::into)
-    } else {
-        log::debug!(
-            "Certificate not found at {}, attempting download",
-            cert_path
+    // 4. Read the cache directly. Only a genuinely absent file may fall back
+    // to the KDS; permission and other I/O failures must remain visible.
+    match tokio::fs::read(&cert_path).await {
+        Ok(certificate) => {
+            log::debug!("Reading certificate from: {}", cert_path.display());
+            Ok(certificate)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            log::debug!(
+                "Certificate not found at {}, attempting download",
+                cert_path.display()
+            );
+            download_hskcek(chip_id).await
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::normalize_chip_id;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn normalizes_fixed_width_chip_id_padding() {
+        assert_eq!(
+            normalize_chip_id(b"T1S70905070401\0\0").unwrap(),
+            "T1S70905070401"
         );
-        download_hskcek(chip_id).await
+        assert_eq!(
+            normalize_chip_id(b"T1S70905070401\r\n").unwrap(),
+            "T1S70905070401"
+        );
+        assert_eq!(
+            normalize_chip_id(b"T1S70905070401  ").unwrap(),
+            "T1S70905070401"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_or_empty_chip_ids() {
+        for chip_id in [
+            &b"\0\0"[..],
+            &b"../certificate"[..],
+            &b"T1S709?x=1"[..],
+            &b"T1S709&x=1"[..],
+            &b"T1S709\0suffix"[..],
+            &b"T1S709/050"[..],
+        ] {
+            let error = normalize_chip_id(chip_id).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+        }
     }
 }
