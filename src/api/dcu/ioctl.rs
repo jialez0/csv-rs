@@ -34,7 +34,7 @@ pub const DCU_GET_REPORT: Ioctl<WriteRead, &MkfdIoctlSecurityAttestationArgs> =
 pub struct MkfdIoctlSecurityAttestationArgs {
     /// DCU identifier for target device
     pub dcu_id: u32,
-    /// For compatibility
+    /// Command identifier required by the running kernel module ABI
     pub cmd_id: u32,
     /// Message version number(default 1)
     pub version: u32,
@@ -48,6 +48,23 @@ pub struct MkfdIoctlSecurityAttestationArgs {
     pub response_size: u64,
     /// Firmware error address
     pub fw_err: u64,
+}
+
+static_assertions::const_assert_eq!(std::mem::size_of::<MkfdIoctlSecurityAttestationArgs>(), 56);
+static_assertions::const_assert_eq!(std::mem::size_of::<AttestationReport>(), 396);
+
+fn validate_report_size(report_size: u32) -> io::Result<()> {
+    let expected_size = std::mem::size_of::<AttestationReport>();
+    if report_size as usize != expected_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "DCU response report size {report_size} does not match expected protocol size \
+                 {expected_size}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 impl MkfdIoctlSecurityAttestationArgs {
@@ -102,6 +119,7 @@ impl MkfdIoctlSecurityAttestationArgs {
             if self.response_data.is_null() {
                 // Cleanup request buffer on allocation failure
                 libc::free(self.request_data);
+                self.request_data = std::ptr::null_mut();
                 return Err(std::io::Error::last_os_error());
             }
 
@@ -139,6 +157,7 @@ impl MkfdIoctlSecurityAttestationArgs {
     pub fn extract_report(&mut self) -> Result<Option<AttestationReport>, io::Error> {
         unsafe {
             if let Some(response) = AttestationResponse::from_raw(self.response_data) {
+                validate_report_size(response.report_size)?;
                 return Ok(Some(response.report.clone()));
             }
         }
@@ -177,4 +196,46 @@ fn hex_dump(data: *const u8, len: usize) {
     }
 
     trace!("Memory dump:\n{}", output);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_report_size, MkfdIoctlSecurityAttestationArgs};
+    use std::io::ErrorKind;
+
+    #[test]
+    fn security_attestation_args_matches_running_kernel_abi() {
+        let value = std::mem::MaybeUninit::<MkfdIoctlSecurityAttestationArgs>::uninit();
+        let base = value.as_ptr();
+        macro_rules! offset_of {
+            ($field:ident) => {{
+                // `addr_of!` does not dereference `base`; it only computes the
+                // address of the field in this repr(C) layout.
+                unsafe { std::ptr::addr_of!((*base).$field) as usize - base as usize }
+            }};
+        }
+
+        assert_eq!(std::mem::size_of::<MkfdIoctlSecurityAttestationArgs>(), 56);
+        assert_eq!(offset_of!(dcu_id), 0);
+        assert_eq!(offset_of!(cmd_id), 4);
+        assert_eq!(offset_of!(version), 8);
+        assert_eq!(offset_of!(request_data), 16);
+        assert_eq!(offset_of!(request_size), 24);
+        assert_eq!(offset_of!(response_data), 32);
+        assert_eq!(offset_of!(response_size), 40);
+        assert_eq!(offset_of!(fw_err), 48);
+    }
+
+    #[test]
+    fn validates_firmware_report_size() {
+        validate_report_size(396).unwrap();
+        assert_eq!(
+            validate_report_size(0).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            validate_report_size(428).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+    }
 }
